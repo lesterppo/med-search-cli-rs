@@ -71,42 +71,48 @@ with exit 2, upstream failures on stderr with exit 1).
 | Command | Status | Notes |
 |---|---|---|
 | `search` | Implemented | Twin-track, dedup, interleave, study-type pushdown, min-citations, sort, verbose pool diagnostics; record keys identical to Python |
-| `fetch` | Implemented | Single + batch (≤50), sections, smart truncation, cache + stale flag, PMC/EuropePMC full text, Unpaywall fallback; date + study type now exact vs Python for all 4 probe PMIDs |
+| `fetch` | Implemented | Single + batch (≤50), sections, smart truncation, cache + synchronous stale refresh, PMC/EuropePMC full text, Unpaywall fallback; date + study type exact vs Python for all 4 probe PMIDs; fetch text byte-identical incl. per-section (fix run) |
 | `cache-stats` | Implemented | Byte-identical counts in deep test |
 | `search-cache` | Implemented | FTS5 snippets identical in deep test; LIKE fallback if FTS5 unavailable |
 | `mesh` | Implemented | Labels, UIs, trees, scope, counts identical for aspirin probe |
 | `related` | Implemented | Neighbor lists identical for 2 older PMIDs |
 | `citedby` | Implemented | Hit counts + lists identical for 2 older PMIDs |
 | `refs` | Implemented | EuropePMC + OpenAlex fallback; identical for seed PMID |
-| `export` | Implemented | bibtex/ris/csv/json; byte-identical lengths for seed PMID in run 2; `--screen` CSV picks up RoB |
+| `export` | Implemented | bibtex/ris/csv/json; byte-identical lengths for seed PMID; `--screen` CSV byte-identical incl. RoB columns (fix run) |
 | `reconcile` | Implemented | n/agree/kappa/disagreements/skipped identical |
-| `rob` | Implemented | Upsert/get/list, domain merge; `updated` is second-precision ISO (Python: microseconds) |
+| `rob` | Implemented | Upsert/get/list, domain merge; `updated` is microsecond ISO, like Python |
 | `trials` | Implemented | Totals + NCT lists identical for aspirin probe |
-| `watch` | Implemented | Baseline + seen-items + PRISMA state; date-sorted twin search |
+| `watch` | Implemented | Baseline + second-run new-paper detection + seen-items + PRISMA state; date-sorted twin search |
 | `prisma` | Implemented | Local-state counts identical in deep test |
 
 ## Known divergences (deliberate or documented, not hidden)
 
-- **Full-text attempts are sequential, PubMed-first.** The original runs
-  PMC and EuropePMC full-text fetches in parallel and takes the first
-  finisher (nondeterministic source). Rust tries PubMed, then EuropePMC,
-  deterministically. The returned text and `source` matched Python in
-  every deep-test case, but a race could theoretically differ.
-- **Stale cache is returned without a background refresh.** The original
-  submits a background refresh for stale entries (which usually dies at
-  process exit anyway). Rust returns the stale record with
-  `cached_stale: true` and does not refresh. A fresh fetch after TTL
-  expiry re-caches normally.
-- **Fetch text length can differ by tens of characters** (seed PMID:
-  5,634 vs 5,680 chars) from section-allocation/truncation edge cases;
-  title, date, study type, and source matched exactly.
+- **Deterministic full-text contract (both sides).** Full-text source
+  priority is PubMed first if the body is ≥200 characters, then
+  EuropePMC if ≥200, then Unpaywall fallback. This replaces the
+  original's parallel first-finisher-wins (nondeterministic) behaviour;
+  the fixed Python clone implements the same contract.
+- **Stale cache: synchronous refresh (both sides).** On a stale hit,
+  both sides attempt a synchronous refresh before returning: success
+  returns the fresh record with `refreshed: true` and re-caches it;
+  failure returns the stale record with `cached_stale: true`. This
+  replaces the original's background-thread refresh, which usually died
+  at process exit.
 - **EuropePMC `sort=date` was returning HTTP 503** ("Search service is
-  temporarily unavailable") during testing; both binaries degrade the
-  same way (PubMed leg still fills `search -S date` / `watch`).
-- **RoB `updated` timestamps** are second-precision; Python emits
-  microseconds. No other field differs.
-- **Clap vs click help/usage text** differs in wording (same flags).
-  Argument errors exit 2 on both.
+  temporarily unavailable") during the original testing; both binaries
+  degrade the same way (PubMed leg still fills `search -S date` /
+  `watch`). Re-checked in the fix run (2026-10-26): no 503 observed,
+  both sides return identical date-ordered results; the shared
+  retry/degrade path is retained.
+- **Clap vs click help layout** differs structurally (usage line lists
+  required args explicitly, `-h` alongside `--help`, long-help line
+  layout, top-level list not truncated with `...`), but flags, flag
+  order, and descriptions match for all 14 commands. Argument errors
+  exit 2 on both.
+- **Error JSON spacing (hypothetical only):** Rust error JSON escapes
+  non-ASCII exactly like Python `json.dumps` and is byte-identical on
+  all six tested error cases; a Python error site using default
+  (spaced) separators would differ by spacing only.
 
 ## Environment notes (from the earlier Rust ports on this VM)
 
