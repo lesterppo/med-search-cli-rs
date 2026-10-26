@@ -1,0 +1,30 @@
+[package]
+name = "med-search-cli-rs"
+version = "0.1.0"
+edition = "2021"
+description = "AI-native biomedical literature search CLI in Rust — PubMed + EuropePMC. Rust port of lesterppo/med-search-cli."
+license = "MIT"
+repository = "https://github.com/lesterppo/med-search-cli-rs"
+
+[[bin]]
+name = "med-search-rs"
+path = "src/main.rs"
+
+[lib]
+name = "med_search_cli_rs"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "cargo"] }
+# rustls-tls (webpki) + the VM's TLS-intercept CA added explicitly in
+# http_client() (/etc/ssl/certs/hatch-egress-ca.pem when present), the
+# pattern proven by fin-agent-cli-rs: without it every HTTPS call fails
+# with UnknownIssuer behind the intercepting proxy.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+roxmltree = "0.20"
+
+[profile.release]
+opt-level = 3
