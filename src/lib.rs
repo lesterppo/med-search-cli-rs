@@ -55,8 +55,15 @@ pub fn sanitize_no_proxy() {
 // ---------------------------------------------------------------------------
 
 pub fn now_iso() -> String {
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
-    format_iso(secs)
+    // Microsecond precision, matching Python's datetime.now(timezone.utc).isoformat().
+    // (Previously second-precision; that made RoB `updated` differ from Python.)
+    let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let secs = d.as_secs() as i64;
+    let micros = d.subsec_micros();
+    let days = secs.div_euclid(86400);
+    let tod = secs.rem_euclid(86400);
+    let (y, m, day) = civil_from_days(days);
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:06}+00:00", y, m, day, tod / 3600, (tod / 60) % 60, tod % 60, micros)
 }
 
 pub fn format_iso(secs: i64) -> String {
@@ -96,7 +103,10 @@ pub fn parse_iso(s: &str) -> Option<i64> {
     let mut tp = time_part.split(':');
     let hh: i64 = tp.next().unwrap_or("0").parse().ok()?;
     let mm: i64 = tp.next().unwrap_or("0").parse().ok()?;
-    let ss: i64 = tp.next().unwrap_or("0").parse().ok()?;
+    // Seconds may carry a fractional part (Python isoformat microseconds);
+    // strip it — age-in-days arithmetic does not need sub-second precision.
+    let ss_token = tp.next().unwrap_or("0");
+    let ss: i64 = ss_token.split('.').next().unwrap_or("0").parse().ok()?;
     Some(days * 86400 + hh * 3600 + mm * 60 + ss)
 }
 
@@ -569,8 +579,13 @@ fn split_sentences(text: &str) -> Vec<String> {
 /// Returns (text, truncated, kept_len). Mirrors the original scoring:
 /// keyword hits + section_bonus, boilerplate -10, word-boundary cut.
 pub fn smart_truncate(text: &str, limit: usize, keywords: Option<HashSet<String>>, section_bonus: i64) -> (String, bool, usize) {
-    if text.len() <= limit {
-        return (text.to_string(), false, text.len());
+    // CHARACTER counts everywhere, matching Python's len() (characters, not
+    // bytes). The previous version used byte lengths (str::len), which cut
+    // non-ASCII sections short: for PMID 42924359 the results section came
+    // out 1746 chars instead of Python's 1792, a 46-char gap in fetch text.
+    let n_chars = text.chars().count();
+    if n_chars <= limit {
+        return (text.to_string(), false, n_chars);
     }
     let keywords = keywords.unwrap_or_else(|| tokenize(text));
     let sentences = split_sentences(text);
@@ -589,32 +604,105 @@ pub fn smart_truncate(text: &str, limit: usize, keywords: Option<HashSet<String>
         .collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0));
     let mut kept: Vec<String> = Vec::new();
-    let mut total = 0usize;
+    let mut total = 0i64;
     let mut truncated = false;
     for (_, s) in scored {
-        if total + s.len() + 1 <= limit {
-            total += s.len() + 1;
+        let s_chars = s.chars().count() as i64;
+        if total + s_chars + 1 <= limit as i64 {
+            total += s_chars + 1;
             kept.push(s);
         } else {
             truncated = true;
-            if limit > total + 4 {
-                let remaining = limit - total - 4;
-                if remaining > 40 {
-                    let mut cut: String = s.chars().take(remaining).collect();
-                    if let Some(sp) = cut.rfind(' ') {
-                        if sp > remaining / 2 {
-                            cut = cut[..sp].to_string();
-                        }
+            // Mirror Python exactly: remaining may go negative; the >40
+            // guard then simply skips the partial cut (no underflow).
+            let remaining = limit as i64 - total - 4;
+            if remaining > 40 {
+                let cut_chars: Vec<char> = s.chars().take(remaining as usize).collect();
+                let mut cut: String = cut_chars.iter().collect();
+                // Last space by CHARACTER index (Python's rfind on a str
+                // returns a character position in effect for the comparison).
+                if let Some(sp) = cut_chars.iter().rposition(|c| *c == ' ') {
+                    if (sp as i64) > remaining / 2 {
+                        cut = cut_chars[..sp].iter().collect();
                     }
-                    kept.push(format!("{cut}..."));
                 }
+                kept.push(format!("{cut}..."));
             }
             break;
         }
     }
     let result = kept.join(" ");
-    let len = result.len();
+    let len = result.chars().count();
     (result, truncated, len)
+}
+
+/// Serialize a JSON value with every non-ASCII character escaped
+/// (`\uXXXX`, surrogate pairs above the BMP), matching Python's
+/// `json.dumps(..., ensure_ascii=True)` default. Used for stderr error
+/// output only; stdout keeps UTF-8, matching Python's
+/// `ensure_ascii=False` success output. Control characters use Python's
+/// short escapes where they exist, otherwise `\u00XX`.
+pub fn json_ascii(v: &Value) -> String {
+    fn escape_str(s: &str) -> String {
+        let mut out = String::with_capacity(s.len() + 2);
+        out.push('"');
+        for c in s.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                '\u{08}' => out.push_str("\\b"),
+                '\u{0c}' => out.push_str("\\f"),
+                c if (c as u32) < 0x20 || (c as u32) > 0x7e => {
+                    let n = c as u32;
+                    if n > 0xffff {
+                        let v = n - 0x10000;
+                        out.push_str(&format!("\\u{:04x}\\u{:04x}", 0xd800 + (v >> 10), 0xdc00 + (v & 0x3ff)));
+                    } else {
+                        out.push_str(&format!("\\u{n:04x}"));
+                    }
+                }
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+        out
+    }
+    fn write(v: &Value, out: &mut String) {
+        match v {
+            Value::Null => out.push_str("null"),
+            Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+            Value::Number(n) => out.push_str(&n.to_string()),
+            Value::String(s) => out.push_str(&escape_str(s)),
+            Value::Array(a) => {
+                out.push('[');
+                for (i, x) in a.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    write(x, out);
+                }
+                out.push(']');
+            }
+            Value::Object(m) => {
+                out.push('{');
+                for (i, (k, x)) in m.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(&escape_str(k));
+                    out.push(':');
+                    write(x, out);
+                }
+                out.push('}');
+            }
+        }
+    }
+    let mut out = String::new();
+    write(v, &mut out);
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1058,5 +1146,77 @@ mod tests {
         // Mirrors main.rs export: first-author surname + year + pmid, alnum only.
         let key: String = "smith2024pmid123".chars().filter(|c| c.is_ascii_alphanumeric()).collect();
         assert_eq!(key, "smith2024pmid123");
+    }
+
+    #[test]
+    fn smart_truncate_counts_characters_not_bytes() {
+        // Regression for the 46-char fetch gap (PMID 42924359): a text of
+        // 100 two-byte characters is 100 chars / 200 bytes. With a
+        // 150-char limit, Python's len() keeps the whole text (no
+        // truncation); the old byte-counting version truncated it.
+        let text = "é ".repeat(50).trim_end().to_string();
+        assert_eq!(text.chars().count(), 99);
+        let (out, trunc, kept) = smart_truncate(&text, 150, None, 0);
+        assert!(!trunc && out == text && kept == 99);
+        // And a genuinely over-limit non-ASCII text truncates by chars.
+        let long = "é".repeat(300);
+        let (out2, trunc2, kept2) = smart_truncate(&long, 100, None, 0);
+        assert!(trunc2);
+        assert_eq!(out2.chars().count(), kept2);
+        assert!(kept2 <= 100);
+    }
+
+    #[test]
+    fn json_ascii_escapes_non_ascii_like_python() {
+        let v = json!({"error": "Invalid PMID 'abc' — expected digits only (e.g. 38261728)."});
+        assert_eq!(
+            json_ascii(&v),
+            r#"{"error":"Invalid PMID 'abc' \u2014 expected digits only (e.g. 38261728)."}"#
+        );
+        // Non-BMP becomes a surrogate pair, exactly like Python's json.dumps.
+        let emoji = json!({"error": "bad 😀"});
+        assert!(json_ascii(&emoji).contains("\\ud83d\\ude00"));
+        // ASCII-only input is unchanged apart from compact separators.
+        assert_eq!(json_ascii(&json!({"error": "plain"})), r#"{"error":"plain"}"#);
+    }
+
+    #[test]
+    fn http_get_retries_429_then_succeeds_and_gives_up() {
+        // Local stub server only — never hammers NCBI/EPMC. First server:
+        // 429, 429, then 200. Second server: always 429 (4 attempts, then None).
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        fn serve(statuses: Vec<u16>) -> String {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            std::thread::spawn(move || {
+                for status in statuses {
+                    let Ok((mut stream, _)) = listener.accept() else { break };
+                    let mut buf = [0u8; 4096];
+                    let _ = stream.read(&mut buf);
+                    let body = if status == 200 { "ok-body" } else { "" };
+                    let resp = format!("HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    let _ = stream.write_all(resp.as_bytes());
+                }
+            });
+            format!("http://{addr}/x")
+        }
+        let client = http_client().unwrap();
+        let url = serve(vec![429, 429, 200]);
+        assert_eq!(http_get(&client, &url), Some(b"ok-body".to_vec()));
+        let url2 = serve(vec![429, 429, 429, 429]);
+        assert_eq!(http_get(&client, &url2), None);
+    }
+
+    #[test]
+    fn now_iso_microseconds_and_parse_iso_fractional() {
+        let now = now_iso();
+        assert!(now.contains('.'), "{now}");
+        let frac = now.split('.').nth(1).unwrap();
+        assert_eq!(frac.len(), 6 + "+00:00".len(), "{now}");
+        // Python-style microsecond timestamps must parse (previously the
+        // fractional seconds made parse_iso return None).
+        assert_eq!(parse_iso("2026-10-26T03:55:24.402753+00:00"), Some(1792986924));
+        assert_eq!(parse_iso("2026-10-26T03:55:24+00:00"), Some(1792986924));
     }
 }
