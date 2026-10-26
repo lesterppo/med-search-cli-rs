@@ -11,12 +11,14 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 fn err_exit(msg: &str, code: i32) -> ! {
-    eprintln!("{}", serde_json::to_string(&json!({"error": msg})).unwrap());
+    // ASCII-escaped compact JSON, matching Python's error sites
+    // (json.dumps(..., separators=(",", ":")) with ensure_ascii=True).
+    eprintln!("{}", json_ascii(&json!({"error": msg})));
     std::process::exit(code);
 }
 
 fn err_exit_val(v: Value, code: i32) -> ! {
-    eprintln!("{}", serde_json::to_string(&v).unwrap());
+    eprintln!("{}", json_ascii(&v));
     std::process::exit(code);
 }
 
@@ -45,7 +47,7 @@ fn study_set(single: Option<String>, multi: Option<String>) -> Result<HashSet<St
 }
 
 #[derive(Parser)]
-#[command(name = "med-search-rs", version, about = "PubMed + EuropePMC biomedical literature search (Rust port of med-search-cli)")]
+#[command(name = "med-search-rs", version, about = "PubMed + EuropePMC biomedical literature search (Rust port of med-search-cli)", help_template = "Usage: {usage}\n\n{all-args}")]
 struct Cli {
     #[command(subcommand)]
     cmd: Commands,
@@ -54,152 +56,164 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Search PubMed + EuropePMC in parallel, deduplicate, enrich, filter
+    #[command(long_about = "Search PubMed + EuropePMC in parallel, deduplicate, enrich, filter.", help_template = "Usage: {usage}\n\n{about}\n\n{all-args}")]
     Search {
-        #[arg(short = 'q', long)]
+        #[arg(short = 'q', long, value_name = "TEXT")]
         query: String,
-        #[arg(short = 'm', long, default_value_t = 5)]
+        #[arg(short = 'm', long, default_value_t = 5, value_name = "INTEGER", hide_default_value = true)]
         max_results: i64,
-        #[arg(short = 'f', long)]
+        #[arg(short = 'f', long, value_name = "TEXT", help = "Lower bound YYYY-MM-DD")]
         from_date: Option<String>,
-        #[arg(short = 't', long)]
+        #[arg(short = 't', long, value_name = "TEXT", help = "Upper bound YYYY-MM-DD")]
         to_date: Option<String>,
-        #[arg(short = 'S', long, default_value = "relevance", value_parser = ["relevance", "date", "citations"])]
+        #[arg(short = 'S', long, default_value = "relevance", value_parser = ["relevance", "date", "citations"], hide_default_value = true, help = "Sort order (EuropePMC)")]
         sort: String,
-        #[arg(short = 'C', long, default_value_t = 0)]
+        #[arg(short = 'C', long, default_value_t = 0, value_name = "INTEGER", hide_default_value = true, help = "Minimum citation count to include a result")]
         min_citations: i64,
-        #[arg(short = 'T', long, value_parser = STUDY_TYPE_TAGS)]
+        #[arg(short = 'T', long, value_parser = STUDY_TYPE_TAGS, help = "Filter to a single study type")]
         study_type: Option<String>,
-        #[arg(short = 'U', long)]
+        #[arg(short = 'U', long, value_name = "TEXT", help = "Comma-separated study types (e.g. 'RCT,Meta-Analysis')")]
         study_types: Option<String>,
-        #[arg(short = 'V', long)]
+        #[arg(short = 'V', long, help = "Emit pool/filter diagnostics on stderr")]
         verbose: bool,
     },
     /// Fetch one or more papers by PMID
+    #[command(long_about = "Fetch one or more papers by PMID (comma-separated for batch).", help_template = "Usage: {usage}\n\n{about}\n\n{all-args}")]
     Fetch {
-        #[arg(short = 'p', long)]
+        #[arg(short = 'p', long, value_name = "TEXT")]
         pmid: String,
-        #[arg(short = 's', long, default_value = "all", value_parser = ["all", "abstract", "intro", "methods", "results", "discussion"])]
+        #[arg(short = 's', long, default_value = "all", value_parser = ["all", "abstract", "intro", "methods", "results", "discussion"], hide_default_value = true)]
         section: String,
-        #[arg(short = 'l', long, default_value_t = 6000)]
+        #[arg(short = 'l', long, default_value_t = 6000, value_name = "INTEGER", hide_default_value = true, help = "Character limit for returned text")]
         limit: i64,
-        #[arg(long, default_value_t = 30)]
+        #[arg(long, default_value_t = 30, value_name = "INTEGER", hide_default_value = true, help = "Cache TTL in days")]
         ttl: i64,
     },
     /// Show cache statistics
-    #[command(name = "cache-stats")]
+    #[command(name = "cache-stats", long_about = "Show cache statistics.", help_template = "Usage: {usage}\n\n{about}\n\n{all-args}")]
     CacheStats,
     /// Full-text search across locally cached papers (zero network calls)
-    #[command(name = "search-cache")]
+    #[command(name = "search-cache", long_about = "Full-text search across locally cached papers (zero network calls).", help_template = "Usage: {usage}\n\n{about}\n\n{all-args}")]
     SearchCache {
-        #[arg(short = 'q', long)]
+        #[arg(short = 'q', long, value_name = "TEXT")]
         query: String,
-        #[arg(short = 'l', long, default_value_t = 20)]
+        #[arg(short = 'l', long, default_value_t = 20, value_name = "INTEGER", hide_default_value = true)]
         limit: i64,
     },
     /// Look up MeSH descriptors for a term
+    #[command(long_about = "Look up MeSH descriptors for a term (build/validate a search strategy).", help_template = "Usage: {usage}\n\n{about}\n\n{all-args}")]
     Mesh {
         term: String,
-        #[arg(short = 'l', long, default_value_t = 5)]
+        #[arg(short = 'l', long, default_value_t = 5, value_name = "INTEGER", hide_default_value = true, help = "Max descriptors to return")]
         limit: i64,
-        #[arg(long)]
+        #[arg(long, help = "Exact label match only")]
         exact: bool,
-        #[arg(long)]
+        #[arg(long, help = "Also report PubMed hit counts for each descriptor (strategy validation)")]
         counts: bool,
     },
     /// Similar articles (PubMed neighbor links)
+    #[command(long_about = "Similar articles (PubMed neighbor links) — snowball from a seed paper.", help_template = "Usage: {usage}\n\n{about}\n\n{all-args}")]
     Related {
-        #[arg(short = 'p', long)]
+        #[arg(short = 'p', long, value_name = "TEXT")]
         pmid: String,
-        #[arg(short = 'm', long, default_value_t = 10)]
+        #[arg(short = 'm', long, default_value_t = 10, value_name = "INTEGER", hide_default_value = true)]
         max_results: i64,
     },
     /// Who cites this paper
+    #[command(long_about = "Who cites this paper (forward citation chasing / surveillance).", help_template = "Usage: {usage}\n\n{about}\n\n{all-args}")]
     Citedby {
-        #[arg(short = 'p', long)]
+        #[arg(short = 'p', long, value_name = "TEXT")]
         pmid: String,
-        #[arg(short = 'm', long, default_value_t = 10)]
+        #[arg(short = 'm', long, default_value_t = 10, value_name = "INTEGER", hide_default_value = true)]
         max_results: i64,
-        #[arg(short = 'S', long, default_value = "date", value_parser = ["date", "citations"])]
+        #[arg(short = 'S', long, default_value = "date", value_parser = ["date", "citations"], hide_default_value = true)]
         sort: String,
     },
     /// Reference list of a paper
+    #[command(long_about = "Reference list of a paper (backward citation chasing).", help_template = "Usage: {usage}\n\n{about}\n\n{all-args}")]
     Refs {
-        #[arg(short = 'p', long)]
+        #[arg(short = 'p', long, value_name = "TEXT")]
         pmid: String,
-        #[arg(short = 'm', long, default_value_t = 15)]
+        #[arg(short = 'm', long, default_value_t = 15, value_name = "INTEGER", hide_default_value = true)]
         max_results: i64,
     },
     /// Export records for a reference manager
+    #[command(long_about = "Export records for a reference manager (BibTeX/RIS/CSV/JSON).\n\nThe screened CSV adds blank dual-reviewer columns plus the fields a PRISMA flow diagram needs, so screening can start immediately. A/B independent-screen workflow: reviewer A fills include_a/reason_a, reviewer B fills include_b/reason_b, then consensus/notes are resolved together and checked with `reconcile`. rob_tool/rob_overall are filled from local risk-of-bias judgements (`rob` command) when present, blank otherwise.", help_template = "Usage: {usage}\n\n{about}\n\n{all-args}")]
     Export {
-        #[arg(short = 'p', long)]
+        #[arg(short = 'p', long, value_name = "TEXT", help = "Comma-separated PMIDs")]
         pmids: String,
-        #[arg(short = 'F', long, default_value = "bibtex", value_parser = ["bibtex", "ris", "csv", "json"])]
+        #[arg(short = 'F', long, default_value = "bibtex", value_parser = ["bibtex", "ris", "csv", "json"], hide_default_value = true)]
         format: String,
-        #[arg(short = 'o', long)]
+        #[arg(short = 'o', long, value_name = "TEXT", help = "Write to file instead of stdout")]
         out: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Add PRISMA screening columns (csv only)")]
         screen: bool,
     },
     /// Agreement stats for a dual-reviewed screening CSV
+    #[command(long_about = "Agreement stats for a dual-reviewed screening CSV.\n\nReads a filled `export --screen` CSV (include_a/include_b as yes/no/1/0) and reports n, agreement %, unweighted Cohen's kappa and the PMID list reviewers disagreed on. Rows where either reviewer left the cell blank are skipped (reported as `skipped`).", help_template = "Usage: {usage}\n\n{about}\n\n{all-args}")]
     Reconcile {
         csv_path: Option<String>,
-        #[arg(short = 'c', long)]
+        #[arg(short = 'c', long, value_name = "TEXT", help = "Filled screening CSV path")]
         csv: Option<String>,
-        #[arg(short = 'F', long, default_value = "json", value_parser = ["json", "text"])]
+        #[arg(short = 'F', long, default_value = "json", value_parser = ["json", "text"], hide_default_value = true)]
         format: String,
     },
     /// Store or fetch risk-of-bias judgements
+    #[command(long_about = "Store or fetch risk-of-bias judgements (local SQLite `rob` table).\n\nUpsert: `rob -p PMID --tool rob2 -d D1=low -d D2=low --overall low --note \"...\"`. Get: `rob -p PMID`. List: `rob --list`. `export --screen` CSVs pick up rob_tool/rob_overall automatically.", help_template = "Usage: {usage}\n\n{about}\n\n{all-args}")]
     Rob {
-        #[arg(short = 'p', long)]
+        #[arg(short = 'p', long, value_name = "TEXT", help = "PMID to get/upsert")]
         pmid: Option<String>,
-        #[arg(long)]
+        #[arg(long, value_name = "TEXT", help = "RoB tool: rob2|robins-i|nos|quadas-2")]
         tool: Option<String>,
-        #[arg(short = 'd', long = "domain")]
+        #[arg(short = 'd', long = "domain", value_name = "TEXT", help = "Domain judgement K=V (repeatable, e.g. -d D1=low)")]
         domains: Vec<String>,
-        #[arg(long)]
+        #[arg(long, value_name = "TEXT", help = "Overall judgement: low|some-concerns|high|critical")]
         overall: Option<String>,
-        #[arg(long)]
+        #[arg(long, value_name = "TEXT", help = "Free-text note")]
         note: Option<String>,
-        #[arg(short = 'l', long = "list")]
+        #[arg(short = 'l', long = "list", help = "List all stored judgements")]
         list_only: bool,
-        #[arg(short = 'F', long, default_value = "json", value_parser = ["json", "text"])]
+        #[arg(short = 'F', long, default_value = "json", value_parser = ["json", "text"], hide_default_value = true)]
         format: String,
     },
     /// ClinicalTrials.gov search
+    #[command(long_about = "ClinicalTrials.gov search (trial-registry leg of a systematic review).", help_template = "Usage: {usage}\n\n{about}\n\n{all-args}")]
     Trials {
-        #[arg(short = 'q', long)]
+        #[arg(short = 'q', long, value_name = "TEXT", help = "Condition / drug / NCT id")]
         query: String,
-        #[arg(short = 'm', long, default_value_t = 5)]
+        #[arg(short = 'm', long, default_value_t = 5, value_name = "INTEGER", hide_default_value = true)]
         max_results: i64,
-        #[arg(short = 's', long)]
+        #[arg(short = 's', long, value_name = "TEXT", help = "RECRUITING | ACTIVE_NOT_RECRUITING | COMPLETED | NOT_YET_RECRUITING")]
         status: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Add conditions + locations")]
         full: bool,
     },
     /// Standing-query surveillance: report only papers not seen before
+    #[command(long_about = "Standing-query surveillance: report only papers not seen before.\n\nFirst run stores the current hits as the baseline (n_new = 0 by design); later runs return just the newly indexed records.", help_template = "Usage: {usage}\n\n{about}\n\n{all-args}")]
     Watch {
-        #[arg(short = 'n', long)]
+        #[arg(short = 'n', long, value_name = "TEXT", help = "Saved query name")]
         name: Option<String>,
-        #[arg(short = 'q', long)]
+        #[arg(short = 'q', long, value_name = "TEXT", help = "Set/replace the saved query")]
         query: Option<String>,
-        #[arg(short = 'm', long)]
+        #[arg(short = 'm', long, value_name = "INTEGER", help = "Results per run (persisted with the query; default 20)")]
         max_results: Option<i64>,
-        #[arg(short = 'L', long = "list")]
+        #[arg(short = 'L', long = "list", help = "List saved queries instead of running one")]
         list_only: bool,
-        #[arg(long)]
+        #[arg(long, help = "Delete a saved query")]
         forget: bool,
     },
     /// PRISMA-style flow counts from existing local state only
+    #[command(long_about = "PRISMA-style flow counts from EXISTING local state only.\n\nIdentification/screening-cache numbers come from the watch baseline (seen_items) joined to lit_cache — nothing is fetched, nothing is invented. Screening decisions live in export --screen CSVs outside the DB, so screened/eligible/included are user-supplied counts composed into the flow. Absent state reports honest zeros (exit 0).", help_template = "Usage: {usage}\n\n{about}\n\n{all-args}")]
     Prisma {
-        #[arg(short = 'n', long)]
+        #[arg(short = 'n', long, value_name = "TEXT", help = "Saved watch-query name (default: all saved queries)")]
         name: Option<String>,
-        #[arg(long, default_value_t = 0)]
+        #[arg(long, default_value_t = 0, value_name = "INTEGER", hide_default_value = true, help = "Records you screened (your count from the --screen CSV; CSVs are never parsed)")]
         screened: i64,
-        #[arg(long, default_value_t = 0)]
+        #[arg(long, default_value_t = 0, value_name = "INTEGER", hide_default_value = true, help = "Full texts you assessed for eligibility (your count)")]
         eligible: i64,
-        #[arg(long, default_value_t = 0)]
+        #[arg(long, default_value_t = 0, value_name = "INTEGER", hide_default_value = true, help = "Studies you included in the review (your count)")]
         included: i64,
-        #[arg(short = 'F', long, default_value = "json", value_parser = ["json", "text"])]
+        #[arg(short = 'F', long, default_value = "json", value_parser = ["json", "text"], hide_default_value = true)]
         format: String,
     },
 }
@@ -294,9 +308,77 @@ fn search_core(client: &reqwest::blocking::Client, query: &str, max_results: usi
 // fetch
 // ---------------------------------------------------------------------------
 
+/// Build a fresh record for a PMID (metadata + full text), without
+/// touching the cache. Returns None iff metadata cannot be fetched —
+/// that is the refresh-success criterion shared with the Python side.
+/// Full-text source priority is deterministic: PubMed first (>=200 chars
+/// of body), then EuropePMC, then Unpaywall fallback.
+fn fresh_record(client: &reqwest::blocking::Client, pmid: &str) -> Option<(Value, String)> {
+    let meta = pmid_metadata(client, pmid)?;
+    let doi = meta.get("doi").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let mut d = json!({
+        "pmid": pmid,
+        "doi": meta["doi"],
+        "title": meta["title"],
+        "abstract": meta["abstract"],
+        "date": meta["date"],
+        "study_type": meta.get("study_type").cloned().unwrap_or(json!("Unknown")),
+        "commentary": meta.get("commentary").cloned().unwrap_or(json!(false)),
+        "sections": Value::Null,
+        "open_access": Value::Null,
+        "proxy_url": Value::Null,
+        "journal": meta["journal"],
+        "authors": meta["authors"],
+        "mesh_keywords": meta["mesh_keywords"],
+        "pub_types": meta["pub_types"],
+    });
+    for flag in ["retracted", "expression_of_concern", "corrected"] {
+        if meta.get(flag).and_then(|v| v.as_bool()) == Some(true) {
+            d[flag] = Value::Bool(true);
+        }
+    }
+    let mut src = "fallback".to_string();
+    let mut sections: Option<Map<String, Value>> = None;
+    if let Some(s) = fetch_pubmed_fulltext(client, pmid) {
+        let body_len: usize = s.values().filter_map(|v| v.as_str()).map(|x| x.chars().count()).sum();
+        if body_len >= 200 {
+            sections = Some(s);
+            src = "pubmed_ft".to_string();
+        }
+    }
+    if sections.is_none() {
+        if let Some(s) = fetch_europepmc_fulltext(client, pmid) {
+            let body_len: usize = s.values().filter_map(|v| v.as_str()).map(|x| x.chars().count()).sum();
+            if body_len >= 200 {
+                sections = Some(s);
+                src = "europepmc_ft".to_string();
+            }
+        }
+    }
+    if let Some(s) = sections {
+        d["sections"] = Value::Object(s);
+    }
+    if src == "fallback" {
+        if let Some(doi_s) = &doi {
+            if let Some(oa) = fetch_unpaywall(client, doi_s) {
+                d["open_access"] = oa;
+                src = "unpaywall".to_string();
+            }
+        }
+    }
+    if let Some(doi_s) = &doi {
+        if let Ok(prefix) = std::env::var("INSTITUTIONAL_PROXY_PREFIX") {
+            if !prefix.is_empty() {
+                d["proxy_url"] = Value::String(format!("{prefix}{}", url_encode(&format!("https://doi.org/{doi_s}"))));
+            }
+        }
+    }
+    Some((d, src))
+}
+
 fn fetch_one(client: &reqwest::blocking::Client, db: &PathBuf, pmid: &str, section: &str, limit: i64, ttl: i64) -> Value {
     let cached = if ttl > 0 { get_cached_data(db, pmid) } else { None };
-    let (mut out, source): (Value, String) = if let Some(c) = cached {
+    let (out, source): (Value, String) = if let Some(c) = cached {
         if !c.stale {
             let mut d = c.data.clone();
             if d.get("date").and_then(|v| v.as_str()).is_none() {
@@ -311,76 +393,35 @@ fn fetch_one(client: &reqwest::blocking::Client, db: &PathBuf, pmid: &str, secti
             d["cached"] = Value::Bool(true);
             (d, c.source)
         } else {
-            let mut d = c.data.clone();
-            d["cached_stale"] = Value::Bool(true);
-            (d, c.source)
+            // Stale contract (shared with Python since the 2026-10-26
+            // fix): attempt a SYNCHRONOUS refresh before returning. On
+            // success the fresh record is returned with refreshed:true
+            // and re-cached; on failure the stale record is returned
+            // with cached_stale:true. No background thread that dies
+            // at process exit.
+            match fresh_record(client, pmid) {
+                Some((mut d, src)) => {
+                    let _ = save_to_cache(db, pmid, &src, &d, ttl);
+                    d["refreshed"] = Value::Bool(true);
+                    (d, src)
+                }
+                None => {
+                    let mut d = c.data.clone();
+                    d["cached_stale"] = Value::Bool(true);
+                    (d, c.source)
+                }
+            }
         }
     } else {
-        let Some(meta) = pmid_metadata(client, pmid) else {
-            return json!({"error": format!("No PubMed record found for PMID {pmid} (invalid or deleted)."), "pmid": pmid});
-        };
-        let doi = meta.get("doi").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let mut d = json!({
-            "pmid": pmid,
-            "doi": meta["doi"],
-            "title": meta["title"],
-            "abstract": meta["abstract"],
-            "date": meta["date"],
-            "study_type": meta.get("study_type").cloned().unwrap_or(json!("Unknown")),
-            "commentary": meta.get("commentary").cloned().unwrap_or(json!(false)),
-            "sections": Value::Null,
-            "open_access": Value::Null,
-            "proxy_url": Value::Null,
-            "journal": meta["journal"],
-            "authors": meta["authors"],
-            "mesh_keywords": meta["mesh_keywords"],
-            "pub_types": meta["pub_types"],
-        });
-        for flag in ["retracted", "expression_of_concern", "corrected"] {
-            if meta.get(flag).and_then(|v| v.as_bool()) == Some(true) {
-                d[flag] = Value::Bool(true);
+        match fresh_record(client, pmid) {
+            Some((d, src)) => {
+                let _ = save_to_cache(db, pmid, &src, &d, ttl);
+                (d, src)
+            }
+            None => {
+                return json!({"error": format!("No PubMed record found for PMID {pmid} (invalid or deleted)."), "pmid": pmid});
             }
         }
-        let mut src = "fallback".to_string();
-        // Sequential full-text attempts (original: parallel, first finisher
-        // wins; sequential PubMed-first is deterministic — see README).
-        let mut sections: Option<Map<String, Value>> = None;
-        if let Some(s) = fetch_pubmed_fulltext(client, pmid) {
-            let body_len: usize = s.values().filter_map(|v| v.as_str()).map(|x| x.len()).sum();
-            if body_len >= 200 {
-                sections = Some(s);
-                src = "pubmed_ft".to_string();
-            }
-        }
-        if sections.is_none() {
-            if let Some(s) = fetch_europepmc_fulltext(client, pmid) {
-                let body_len: usize = s.values().filter_map(|v| v.as_str()).map(|x| x.len()).sum();
-                if body_len >= 200 {
-                    sections = Some(s);
-                    src = "europepmc_ft".to_string();
-                }
-            }
-        }
-        if let Some(s) = sections {
-            d["sections"] = Value::Object(s);
-        }
-        if src == "fallback" {
-            if let Some(doi_s) = &doi {
-                if let Some(oa) = fetch_unpaywall(client, doi_s) {
-                    d["open_access"] = oa;
-                    src = "unpaywall".to_string();
-                }
-            }
-        }
-        if let Some(doi_s) = &doi {
-            if let Ok(prefix) = std::env::var("INSTITUTIONAL_PROXY_PREFIX") {
-                if !prefix.is_empty() {
-                    d["proxy_url"] = Value::String(format!("{prefix}{}", url_encode(&format!("https://doi.org/{doi_s}"))));
-                }
-            }
-        }
-        let _ = save_to_cache(db, pmid, &src, &d, ttl);
-        (d, src)
     };
 
     let abstract_text = out.get("abstract").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -402,7 +443,7 @@ fn fetch_one(client: &reqwest::blocking::Client, db: &PathBuf, pmid: &str, secti
     if out.get("commentary").and_then(|v| v.as_bool()) == Some(true) {
         resp["note"] = Value::String("Editorial/letter/commentary — no abstract available".to_string());
     }
-    for opt in ["doi", "journal", "authors", "mesh_keywords", "proxy_url", "pub_types", "cached", "cached_stale"] {
+    for opt in ["doi", "journal", "authors", "mesh_keywords", "proxy_url", "pub_types", "cached", "cached_stale", "refreshed"] {
         if let Some(v) = out.get(opt) {
             if !is_empty_val(Some(v)) && *v != Value::Bool(false) {
                 resp[opt] = v.clone();
@@ -477,7 +518,7 @@ fn fetch_one(client: &reqwest::blocking::Client, db: &PathBuf, pmid: &str, secti
         }
     }
     if !raw.is_empty() {
-        if raw.len() as i64 > limit {
+        if raw.chars().count() as i64 > limit {
             let keywords = tokenize(&format!("{} {}", out.get("title").and_then(|v| v.as_str()).unwrap_or(""), abstract_text));
             let (trimmed, was_truncated, kept) = smart_truncate(&raw, limit as usize, Some(keywords), section_bonus);
             resp["text"] = Value::String(trimmed);
@@ -611,7 +652,7 @@ fn main() {
             let (final_records, n_us, n_eu, pre_filter, unknown) = search_core(&client, &clean, max_results as usize, from_date.as_deref(), to_date.as_deref(), &sort, min_citations, &allowed);
             emit(&Value::Array(final_records.clone()));
             if verbose {
-                eprintln!("{}", serde_json::to_string(&json!({"pool": {"pubmed": n_us, "europepmc": n_eu, "deduped": pre_filter}, "kept": final_records.len(), "dropped_no_citation_data": unknown, "retracted_in_results": final_records.iter().filter(|r| r.get("retracted").and_then(|v| v.as_bool()) == Some(true)).count()})).unwrap());
+                eprintln!("{}", json_ascii(&json!({"pool": {"pubmed": n_us, "europepmc": n_eu, "deduped": pre_filter}, "kept": final_records.len(), "dropped_no_citation_data": unknown, "retracted_in_results": final_records.iter().filter(|r| r.get("retracted").and_then(|v| v.as_bool()) == Some(true)).count()})));
             }
         }
         Commands::Fetch { pmid, section, limit, ttl } => {
@@ -1114,7 +1155,7 @@ fn main() {
                                 cached += 1;
                                 let Ok(data) = serde_json::from_str::<Value>(&r.1) else { no_text += 1; continue };
                                 let has_abs = data.get("abstract").and_then(|v| v.as_str()).map(|s| !s.trim().is_empty()).unwrap_or(false);
-                                let body: usize = data.get("sections").and_then(|v| v.as_object()).map(|m| m.values().filter_map(|x| x.as_str()).map(|s| s.len()).sum()).unwrap_or(0);
+                                let body: usize = data.get("sections").and_then(|v| v.as_object()).map(|m| m.values().filter_map(|x| x.as_str()).map(|s| s.chars().count()).sum()).unwrap_or(0);
                                 let has_ft = body >= 200;
                                 if has_ft { fulltext += 1; }
                                 if has_abs { with_abs += 1; }
